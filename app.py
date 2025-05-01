@@ -3,8 +3,12 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import requests # Import the requests library
-import time # Import time for caching timestamp and last updated timestamp formatting
+import requests
+import time
+
+# Import Flask-Limiter and its key function
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address # Helps identify the client by IP
 
 # --- Configuration & Initialization ---
 load_dotenv()
@@ -33,7 +37,6 @@ except Exception as e:
     exit()
 
 # --- System Prompt: Define the Chatbot's Persona and Scope ---
-# IMPORTANT: Update the prompt to inform the model about the real-time data it receives
 SYSTEM_PROMPT = """
 You are a specialized Bitcoin chatbot. Your knowledge base is focused ONLY on Bitcoin.
 Answer the user's questions accurately and concisely about Bitcoin concepts, history,
@@ -53,22 +56,16 @@ If the user asks for data *not* included in the provided information (only price
 """
 
 # --- Caching Configuration ---
-# Cache data for 5 minutes (300 seconds) to avoid hitting API rate limits
 CACHE_DURATION_SECONDS = 300
 cached_data = None
 last_fetch_time = 0
 
-# --- Helper to fetch real-time data from CoinGecko (now uses caching) ---
+# --- Helper to fetch real-time data from CoinGecko (uses caching) ---
 def get_bitcoin_data():
-    """Fetches current Bitcoin price, market cap, volume from CoinGecko, using a cache."""
-    global cached_data, last_fetch_time # Declare global variables
-
+    global cached_data, last_fetch_time
     current_time = time.time()
-
-    # Check if cached data is still valid
     if cached_data and (current_time - last_fetch_time) < CACHE_DURATION_SECONDS:
         print("Using cached data.")
-        # Return the cached formatted data string and no error
         return cached_data['formatted_string'], None
 
     print("Fetching fresh data from CoinGecko...")
@@ -76,7 +73,7 @@ def get_bitcoin_data():
 
     try:
         response = requests.get(api_url)
-        response.raise_for_status() # Raise an HTTPError for bad responses (4xx or 5xx)
+        response.raise_for_status()
         data = response.json()
 
         if 'bitcoin' in data and 'usd' in data['bitcoin']:
@@ -84,81 +81,62 @@ def get_bitcoin_data():
             price = btc_data.get('usd')
             market_cap = btc_data.get('usd_market_cap')
             volume_24h = btc_data.get('usd_24h_vol')
-            last_updated_unix = btc_data.get('last_updated_at') # Unix timestamp
+            last_updated_unix = btc_data.get('last_updated_at')
 
             last_updated_readable = "N/A"
             if last_updated_unix:
                  try:
                     last_updated_readable = time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(last_updated_unix))
                  except Exception:
-                     pass # Ignore formatting errors
+                     pass
 
-            # Format the data clearly for the prompt
-            formatted_data_string = "--- REAL-TIME BITCOIN DATA ---\n"
+            formatted_data_string = "--- RECENT BITCOIN DATA ---\n" # Use RECENT as in prompt
             formatted_data_string += f"Current Price (USD): ${price:,.2f}\n" if price is not None else "Current Price (USD): N/A\n"
             formatted_data_string += f"Market Cap (USD): ${market_cap:,.2f}\n" if market_cap is not None else "Market Cap (USD): N/A\n"
             formatted_data_string += f"24h Volume (USD): ${volume_24h:,.2f}\n" if volume_24h is not None else "24h Volume (USD): N/A\n"
             formatted_data_string += f"Last Updated (UTC): {last_updated_readable}\n"
             formatted_data_string += "--------------------------\n\n"
 
-            # Store data in cache and update fetch time
             cached_data = {
                 'formatted_string': formatted_data_string,
-                'raw_data': data # Optionally store raw data too
+                'raw_data': data
             }
             last_fetch_time = current_time
 
-            return formatted_data_string, None # Return formatted string and no error
+            return formatted_data_string, None
 
         else:
             fetch_error = "Could not parse Bitcoin data from API."
             print(f"Error: {fetch_error}")
-            # If parsing fails, check if we have stale cached data to fall back on
             if cached_data:
                  print("Falling back to stale cached data.")
-                 return cached_data['formatted_string'], "Using stale data due to parsing error." # Indicate it's stale
-            return "Could not fetch real-time data due to an API response format issue.", fetch_error # No cache fallback
+                 return cached_data['formatted_string'], "Using stale data due to parsing error."
+            return "Could not fetch real-time data due to an API response format issue.", fetch_error
 
     except requests.exceptions.RequestException as e:
-        # Handle network errors, timeouts, HTTP errors (like 429!)
         print(f"Error fetching Bitcoin data from CoinGecko: {e}")
         fetch_error = f"Request Error: {e}"
-        # If fetch fails, check if we have stale cached data to fall back on
         if cached_data:
             print("Falling back to stale cached data.")
-            return cached_data['formatted_string'], "Using stale data due to fetch error." # Indicate it's stale
-        return "Could not fetch real-time data due to an API error.", fetch_error # No cache fallback
+            return cached_data['formatted_string'], "Using stale data due to fetch error."
+        return "Could not fetch real-time data due to an API error.", fetch_error
 
     except Exception as e:
-        # Handle other potential errors
         print(f"An unexpected error occurred fetching Bitcoin data: {e}")
         fetch_error = f"Unexpected Error: {e}"
-        # If unexpected error, check if we have stale cached data
         if cached_data:
              print("Falling back to stale cached data.")
-             return cached_data['formatted_string'], "Using stale data due to unexpected error." # Indicate it's stale
-        return "Could not fetch real-time data due to an unexpected error.", fetch_error # No cache fallback
+             return cached_data['formatted_string'], "Using stale data due to unexpected error."
+        return "Could not fetch real-time data due to an unexpected error.", fetch_error
 
 
 # --- Helper to format history for Gemini API ---
 def format_history_for_gemini(history):
-    """Converts history from frontend format to Gemini API format."""
     gemini_history = []
-    # Prepend the system prompt as the initial 'user' turn
     gemini_history.append({'role': 'user', 'parts': [{'text': SYSTEM_PROMPT}]})
-    # The very first expected response from the model after the system prompt
-    # is typically empty or a greeting, which we represent here.
-    # This message should align with the prompt.
-    gemini_history.append({'role': 'model', 'parts': [{'text': 'Okay, I am ready to answer questions about Bitcoin and use the provided real-time data.'}]}) # Updated initial response
+    gemini_history.append({'role': 'model', 'parts': [{'text': 'Okay, I am ready to answer questions about Bitcoin and use the provided real-time data.'}]})
 
-    # Add previous chat turns
     for message in history:
-        # We need to ensure that previous user turns that *might* have included the data block
-        # in the original `send_message` call are represented cleanly in the history passed to `start_chat`.
-        # However, the Gemini API handles adding the *full prompt* (including the data block)
-        # to its internal history. So, when we receive history from the frontend, it's just
-        # the user/bot text. We format that *as is* for the history.
-        # The real-time data is only prepended to the *current* user turn input for `send_message`.
         role = 'user' if message['type'] == 'user' else 'model'
         gemini_history.append({'role': role, 'parts': [{'text': message['text']}]})
 
@@ -168,9 +146,24 @@ def format_history_for_gemini(history):
 app = Flask(__name__)
 CORS(app) # Enable CORS for all routes
 
+# --- Limiter Initialization ---
+# Configure the limiter. Using 'storage_uri' requires a backend like redis or memcached
+# For simple in-memory storage (suitable for single-process deployments like Render's free tier)
+# just omit the storage_uri.
+# Using a key_func like get_remote_address limits per client IP.
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=["200 per day", "50 per hour"], # Optional: apply default limits globally
+    storage_uri="memory://" # Use in-memory storage
+)
+
+
 # --- API Endpoint ---
 
 @app.route('/ask', methods=['POST'])
+# Apply the rate limit specifically to the /ask route
+@limiter.limit("10/minute") # This is the core rate limit for the endpoint
 def ask_bitcoin_api():
     """Handles POST requests with JSON data and returns a JSON response."""
     data = request.get_json()
@@ -188,42 +181,24 @@ def ask_bitcoin_api():
     realtime_data_string, fetch_error = get_bitcoin_data()
 
     # --- Prepare Prompt for Gemini ---
-    # Combine real-time data string with the user's question for the *current* turn
-    # This data is *not* added to the chat history passed to start_chat by format_history_for_gemini,
-    # but it is prepended to the input for send_message. The Gemini API then includes
-    # this full input (data + user question) in its internal history for the *next* turn.
-
-    # Construct the data block part of the prompt
     data_block_for_prompt = "--- RECENT BITCOIN DATA ---\n"
     if fetch_error:
-         # If data fetch failed, put the error message directly in the data block
          data_block_for_prompt += f"Data Fetch Status: ERROR - {fetch_error}\n"
     else:
-         # Otherwise, use the successfully fetched data string
-         data_block_for_prompt += realtime_data_string.replace("--- REAL-TIME BITCOIN DATA ---\n", "") # Remove the header as we add it here
+         data_block_for_prompt += realtime_data_string.replace("--- RECENT BITCOIN DATA ---\n", "")
 
     data_block_for_prompt += "--------------------------\n\n"
 
-
-    # Combine the data block with the user question
     prompt_with_data = f"{data_block_for_prompt}User Question: {user_question}\n\nAnswer:"
 
     # --- Generate Content ---
     bot_response = "Sorry, I couldn't process your request."
 
     try:
-        # Start chat with the history from the frontend (formatted)
-        # This history *does not* include the data blocks from previous turns
-        # because the frontend only sends the text. The Gemini API's internal history
-        # created by send_message *will* include the full prompts from previous turns.
         gemini_history = format_history_for_gemini(chat_history_frontend)
         chat = model.start_chat(history=gemini_history)
-
-        # Send the *current* user question along with the real-time data string
-        # The API handles adding this full turn (prompt and response) to its internal history
         response = chat.send_message(prompt_with_data)
 
-        # Process the response
         if response.parts:
              bot_response = response.text.strip()
         else:
@@ -239,7 +214,14 @@ def ask_bitcoin_api():
     # Return the response as JSON
     return jsonify({"answer": bot_response})
 
+# --- Handle Rate Limit Exceeded ---
+# Flask-Limiter by default returns a 429 response.
+# You can customize the handler if you want a different response body or status code.
+# @app.errorhandler(429)
+# def ratelimit_handler(e):
+#     return jsonify({"error": f"Rate limit exceeded: {e.description}"}), 429
+
+
 # --- Run the Flask App ---
 if __name__ == '__main__':
-    # Ensure the venv is activated before running
     app.run(debug=True, port=5000)
