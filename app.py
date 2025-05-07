@@ -6,6 +6,7 @@ from flask_cors import CORS
 import requests
 import time
 import logging
+import re # Import regex for potentially more robust keyword matching
 
 # --- Configure Logging ---
 logger = logging.getLogger()
@@ -43,7 +44,7 @@ except Exception as e:
     logger.exception(f"Error creating or testing Gemini model '{GEMINI_MODEL_NAME}':")
     logger.critical("Please check your GEMINI_MODEL_NAME in the .env file and ensure it's valid for generateContent.")
 
-# --- System Prompt ---
+# --- System Prompt (Keep it) ---
 SYSTEM_PROMPT = """
 You are a specialized Bitcoin chatbot. Your knowledge base is focused ONLY on Bitcoin.
 Answer the user's questions accurately and concisely about Bitcoin concepts, history,
@@ -164,6 +165,75 @@ INTRO_TOUR_MESSAGES = [
     "That concludes the brief tour! Feel free to ask me specific questions about any of these topics or anything else related to Bitcoin. Just type your question below.",
 ]
 
+# --- Curated Resource Links ---
+# Define keywords and associated links
+# Using regex word boundaries (\b) helps match whole words
+RESOURCE_LINKS = {
+    r'\b(what is bitcoin|intro to bitcoin|bitcoin explained)\b': [
+        {"text": "Bitcoin.org - Getting Started", "url": "https://bitcoin.org/en/getting-started"},
+        {"text": "CoinDesk - What is Bitcoin?", "url": "https://www.coindesk.com/learn/what-is-bitcoin"},
+    ],
+    r'\b(blockchain)\b': [
+        {"text": "Investopedia - Blockchain Explained", "url": "https://www.investopedia.com/terms/b/blockchain.asp"},
+        {"text": "Bitcoin.org - Blockchain (Developer Guide)", "url": "https://bitcoin.org/en/developer-guide#block-chain"},
+    ],
+    r'\b(mining|bitcoin mining)\b': [
+         {"text": "Coinbase - What is Bitcoin Mining?", "url": "https://www.coinbase.com/learn/crypto-basics/what-is-mining"},
+    ],
+    r'\b(satoshi nakamoto|whitepaper)\b': [
+         {"text": "Bitcoin Whitepaper (Original PDF)", "url": "https://bitcoin.org/bitcoin.pdf"},
+    ],
+    r'\b(halving|bitcoin halving)\b': [
+         {"text": "CoinGecko - Bitcoin Halving Guide", "url": "https://www.coingecko.com/learn/bitcoin-halving-guide"},
+    ],
+    r'\b(wallet|wallets|bitcoin wallet)\b': [
+        {"text": "Bitcoin.org - Choose your Wallet", "url": "https://bitcoin.org/en/choose-your-wallet"},
+    ],
+    r'\b(lightning network|layer 2)\b': [
+        {"text": "Lightning Network Whitepaper (Original PDF)", "url": "https://lightning.network/lightning-network-paper.pdf"}, # More technical
+        {"text": "Coinbase - What is the Lightning Network?", "url": "https://www.coinbase.com/learn/crypto-basics/what-is-the-lightning-network"},
+    ],
+    r'\b(price|market cap|volume|coin gecko|coingecko)\b': [
+         {"text": "CoinGecko - Bitcoin Price Chart", "url": "https://www.coingecko.com/en/coins/bitcoin"},
+    ],
+    r'\b(transaction|transactions|fees)\b': [
+         {"text": "Mempool.space (Bitcoin Explorer)", "url": "https://mempool.space/"},
+    ],
+    # Add more keywords and relevant links here!
+}
+
+# --- Helper to find relevant links ---
+def find_relevant_links(text_to_analyze, links_dict):
+    """
+    Analyzes text for keywords and returns a set of unique relevant links.
+    Analyzes both user question and bot response.
+    """
+    found_links = set()
+    lower_text = text_to_analyze.lower() # Case-insensitive matching
+
+    for pattern, links in links_dict.items():
+        # Use re.search for more flexible pattern matching (like word boundaries)
+        if re.search(pattern, lower_text):
+            logger.debug(f"Matched pattern '{pattern}' in text.")
+            for link_info in links:
+                # Add a tuple (text, url) to the set to ensure uniqueness by the link itself
+                found_links.add((link_info['text'], link_info['url']))
+
+    # Also check the original user question if it's available in the request context (optional)
+    # For simplicity here, we'll just analyze the bot response for now.
+    # If you wanted to analyze the user question too, you'd pass it here:
+    # if user_question_text:
+    #    lower_question = user_question_text.lower()
+    #    for pattern, links in links_dict.items():
+    #        if re.search(pattern, lower_question):
+    #             logger.debug(f"Matched pattern '{pattern}' in user question.")
+    #             for link_info in links:
+    #                 found_links.add((link_info['text'], link_info['url']))
+
+
+    return list(found_links) # Convert set back to list
+
+
 # --- Flask App Setup ---
 app = Flask(__name__)
 CORS(app) # Enable CORS for all routes
@@ -188,26 +258,25 @@ def ask_bitcoin_api():
     """Handles POST requests with JSON data for standard chat questions."""
     if model is None:
          logger.error("Gemini model not initialized.")
-         return jsonify({"answer": "The chatbot backend is not fully initialized. Please try again later or contact the administrator."}), 503 # Service Unavailable
+         return jsonify({"answer": "The chatbot backend is not fully initialized. Please try again later or contact the administrator."}), 503
 
     logger.info("Received /ask request.")
     try:
         data = request.get_json()
 
-        # Validate request data
         if not data or 'question' not in data or 'history' not in data:
             logger.warning("Invalid request: Missing 'question' or 'history' in JSON body.")
-            return jsonify({"error": "Invalid request. Please provide 'question' and 'history' in the JSON body."}), 400 # Bad Request
+            return jsonify({"error": "Invalid request. Please provide 'question' and 'history' in the JSON body."}), 400
 
         user_question = data['question']
         chat_history_frontend = data['history']
 
         if not user_question:
              logger.info("Received empty user question.")
-             return jsonify({"answer": "Please enter a question."}) # Return a friendly message for empty input
+             return jsonify({"answer": "Please enter a question."})
 
         logger.info(f"User Question: {user_question}")
-        logger.debug(f"Chat History received ({len(chat_history_frontend)} turns): {chat_history_frontend}") # Log history for debugging
+        logger.debug(f"Chat History received ({len(chat_history_frontend)} turns): {chat_history_frontend}")
 
         # --- Fetch Real-time Data (uses cache internally) ---
         realtime_data_string, fetch_error = get_bitcoin_data()
@@ -248,7 +317,17 @@ def ask_bitcoin_api():
             logger.exception("An error occurred during Gemini send_message:")
             bot_response = f"An internal error occurred while contacting the AI: {e}"
 
-        # Return the AI's chat response as JSON
+        # --- Find and Append Relevant Links ---
+        relevant_links = find_relevant_links(bot_response, RESOURCE_LINKS)
+        if relevant_links:
+             logger.info(f"Found {len(relevant_links)} relevant links.")
+             # Format links in Markdown list
+             links_section = "\n\n**Related Resources:**\n"
+             for text, url in relevant_links:
+                 links_section += f"- [{text}]({url})\n"
+             bot_response += links_section # Append to the bot's response
+
+        # Return the AI's chat response with optional links as JSON
         return jsonify({"answer": bot_response})
 
     except Exception as e:
@@ -256,16 +335,15 @@ def ask_bitcoin_api():
         return jsonify({"error": "An unexpected internal server error occurred."}), 500
 
 
-# Endpoint for getting the introductory tour messages
-@app.route('/tour', methods=['GET']) # Use GET as it's just retrieving static data
-# Apply a rate limit if you added the feature (maybe different from /ask)
+# Endpoint for getting the introductory tour messages (Keep it separate)
+@app.route('/tour', methods=['GET'])
+# Apply a rate limit if you added the feature
 # @limiter.limit("5 per hour")
 def get_intro_tour():
     """Returns the list of introductory tour messages."""
     logger.info("Received /tour request.")
     try:
-        # Return the predefined list of messages as JSON
-        return jsonify({"tour": INTRO_TOUR_MESSAGES}) # Return list under 'tour' key
+        return jsonify({"tour": INTRO_TOUR_MESSAGES})
     except Exception as e:
         logger.exception("An unexpected error occurred in the /tour route handler:")
         return jsonify({"error": "An unexpected internal server error occurred while fetching tour data."}), 500
