@@ -9,13 +9,21 @@ import logging
 import re # Import regex for potentially more robust keyword matching
 
 # --- Configure Logging ---
+# Get the root logger
 logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+# Set the minimum level to log (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+logger.setLevel(logging.INFO) # Use INFO for general operation, DEBUG for detailed troubleshooting
+
+# Create a handler to output logs to the console (stderr by default)
 handler = logging.StreamHandler()
+# Define the log message format
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 handler.setFormatter(formatter)
+
+# Add the handler to the logger (prevent duplicate handlers if hot-reloading)
 if not logger.handlers:
     logger.addHandler(handler)
+
 
 # --- Configuration & Initialization ---
 load_dotenv()
@@ -23,6 +31,7 @@ API_KEY = os.getenv("GOOGLE_API_KEY")
 GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "gemini-1.0-pro")
 
 if not API_KEY:
+    # Use logging.critical for errors that prevent the app from starting
     logger.critical("Error: GOOGLE_API_KEY not found.")
     logger.critical("Please make sure you have a .env file with GOOGLE_API_KEY=YOUR_API_KEY")
     exit()
@@ -31,11 +40,12 @@ try:
     genai.configure(api_key=API_KEY)
     logger.info("Gemini API configured successfully.")
 except Exception as e:
+    # Use logging.exception to log the error including the traceback
     logger.exception("Error configuring Gemini API:")
     exit()
 
 # --- Model Setup ---
-model = None
+model = None # Initialize model as None
 try:
     logger.info(f"Attempting to use model: {GEMINI_MODEL_NAME}")
     model = genai.GenerativeModel(GEMINI_MODEL_NAME)
@@ -44,24 +54,30 @@ except Exception as e:
     logger.exception(f"Error creating or testing Gemini model '{GEMINI_MODEL_NAME}':")
     logger.critical("Please check your GEMINI_MODEL_NAME in the .env file and ensure it's valid for generateContent.")
 
-# --- System Prompt (Keep it) ---
+
+# --- System Prompt: Define the Chatbot's Persona and Scope ---
+# *** MODIFIED PROMPT STARTS HERE ***
 SYSTEM_PROMPT = """
-You are a specialized Bitcoin chatbot. Your knowledge base is focused ONLY on Bitcoin.
-Answer the user's questions accurately and concisely about Bitcoin concepts, history,
-technology (blockchain, mining, cryptography), economic aspects (market trends, adoption),
-notable figures, significant events, and related technical details (like forks, wallets, Layer 2 solutions like Lightning Network).
+CRITICAL INSTRUCTION: You are a specialized Bitcoin chatbot. Your knowledge base is focused STRICTLY and ONLY on Bitcoin concepts, history, technology, economics, figures, events, and technical details (blockchain, mining, cryptography, wallets, Layer 2 like Lightning Network).
 
-You are also provided with RECENT Bitcoin data (price, market cap, volume, etc.) at the beginning of the user's input, enclosed by "--- RECENT BITCOIN DATA ---" markers.
-**Use this provided Bitcoin data if the user asks questions about the current price, market cap, or trading volume.**
-If the provided data indicates a fetch error or is N/A for a specific field, inform the user that real-time data is currently unavailable for that point and provide a general answer based on your training data if possible.
-If the user asks about historical prices or trends, you can use your general knowledge but make it clear you are not using the *provided* recent figure.
-If the user asks for data *not* included in the provided information (only price, market cap, 24h volume are provided), use your general knowledge if possible or state you only have access to the provided data points.
+Your role is purely informative and factual. UNDER NO CIRCUMSTANCES provide financial advice, investment recommendations, or price predictions. Do not speculate on future price movements or recommend buying/selling decisions.
 
-- Be factual and objective.
-- Do NOT give financial advice, investment recommendations, or price predictions beyond interpreting the provided Bitcoin data when asked specifically about *current* values.
-- If a question is clearly unrelated to Bitcoin (e.g., asking about Ethereum details, other cryptocurrencies unless in direct comparison to Bitcoin, cooking recipes, or general knowledge), politely state that you specialize in Bitcoin and cannot answer the unrelated query.
-- Keep answers focused and avoid unnecessary jargon, but explain technical terms if needed.
+You are provided with RECENT Bitcoin data under "--- RECENT BITCOIN DATA ---".
+- When responding to questions about CURRENT price, market cap, or 24h volume, ALWAYS use the provided data EXACTLY.
+- Begin answers about current metrics by referencing the data, e.g., "According to the recent data provided, the current price is...".
+- If the data block indicates an ERROR or a value is N/A, state "I could not fetch real-time data for that at this moment" before giving any general information based on your training. Do NOT use outdated general knowledge for CURRENT figures.
+
+Answer user questions accurately and concisely. Aim for clarity and avoid unnecessary jargon; explain technical terms (like hashrate, UTXO, difficulty) when first used or requested. Use Markdown formatting (bold, lists) for readability when appropriate.
+
+If a question is:
+1. Clearly outside Bitcoin scope (other crypto details, general knowledge): Politely state: "I am a specialized chatbot focused only on Bitcoin, and I cannot answer questions about [topic]."
+2. About comparing Bitcoin to another crypto feature: Briefly explain the Bitcoin aspect and mention the comparison point without detailing the other crypto.
+3. Ambiguous or you lack sufficient information: State that you do not have enough information to provide a confident answer on that specific topic, or politely ask for clarification if appropriate.
+
+Maintain a helpful, informative, and neutral tone. Do not express opinions or engage in speculative discussions.
 """
+# *** MODIFIED PROMPT ENDS HERE ***
+
 
 # --- Caching Configuration (Keep it) ---
 CACHE_DURATION_SECONDS = 300
@@ -142,9 +158,12 @@ def get_bitcoin_data():
 # --- Helper to format history for Gemini API (Keep it) ---
 def format_history_for_gemini(history):
     gemini_history = []
+    # The first turn should be the system prompt
     gemini_history.append({'role': 'user', 'parts': [{'text': SYSTEM_PROMPT}]})
-    gemini_history.append({'role': 'model', 'parts': [{'text': 'Okay, I am ready to answer questions about Bitcoin and use the provided real-time data.'}]})
+    # The AI's expected initial response after the system prompt
+    gemini_history.append({'role': 'model', 'parts': [{'text': 'Okay, I am ready to answer questions about Bitcoin and use the provided real-time data.'}]}) # This should generally align with the prompt's capabilities
 
+    # Add previous chat turns
     for message in history:
         role = 'user' if message['type'] == 'user' else 'model'
         gemini_history.append({'role': role, 'parts': [{'text': message['text']}]})
@@ -165,9 +184,7 @@ INTRO_TOUR_MESSAGES = [
     "That concludes the brief tour! Feel free to ask me specific questions about any of these topics or anything else related to Bitcoin. Just type your question below.",
 ]
 
-# --- Curated Resource Links ---
-# Define keywords and associated links
-# Using regex word boundaries (\b) helps match whole words
+# --- Curated Resource Links (Keep it) ---
 RESOURCE_LINKS = {
     r'\b(what is bitcoin|intro to bitcoin|bitcoin explained)\b': [
         {"text": "Bitcoin.org - Getting Started", "url": "https://bitcoin.org/en/getting-started"},
@@ -202,37 +219,22 @@ RESOURCE_LINKS = {
     # Add more keywords and relevant links here!
 }
 
-# --- Helper to find relevant links ---
+# --- Helper to find relevant links (Keep it) ---
 def find_relevant_links(text_to_analyze, links_dict):
     """
     Analyzes text for keywords and returns a set of unique relevant links.
-    Analyzes both user question and bot response.
+    Analyzes the provided text (usually bot response).
     """
     found_links = set()
-    lower_text = text_to_analyze.lower() # Case-insensitive matching
+    lower_text = text_to_analyze.lower()
 
     for pattern, links in links_dict.items():
-        # Use re.search for more flexible pattern matching (like word boundaries)
         if re.search(pattern, lower_text):
             logger.debug(f"Matched pattern '{pattern}' in text.")
             for link_info in links:
-                # Add a tuple (text, url) to the set to ensure uniqueness by the link itself
                 found_links.add((link_info['text'], link_info['url']))
 
-    # Also check the original user question if it's available in the request context (optional)
-    # For simplicity here, we'll just analyze the bot response for now.
-    # If you wanted to analyze the user question too, you'd pass it here:
-    # if user_question_text:
-    #    lower_question = user_question_text.lower()
-    #    for pattern, links in links_dict.items():
-    #        if re.search(pattern, lower_question):
-    #             logger.debug(f"Matched pattern '{pattern}' in user question.")
-    #             for link_info in links:
-    #                 found_links.add((link_info['text'], link_info['url']))
-
-
-    return list(found_links) # Convert set back to list
-
+    return list(found_links)
 
 # --- Flask App Setup ---
 app = Flask(__name__)
@@ -247,6 +249,7 @@ CORS(app) # Enable CORS for all routes
 #     default_limits=["200 per day", "50 per hour"],
 #     storage_uri="memory://"
 # )
+
 
 # --- API Endpoints ---
 
@@ -318,11 +321,18 @@ def ask_bitcoin_api():
             bot_response = f"An internal error occurred while contacting the AI: {e}"
 
         # --- Find and Append Relevant Links ---
+        # Analyze the *final* bot response text for keywords
         relevant_links = find_relevant_links(bot_response, RESOURCE_LINKS)
+        # Optional: Also analyze the user question
+        # relevant_links.extend(find_relevant_links(user_question, RESOURCE_LINKS))
+        # relevant_links = list(set(relevant_links)) # Deduplicate if combining
+
         if relevant_links:
              logger.info(f"Found {len(relevant_links)} relevant links.")
              # Format links in Markdown list
              links_section = "\n\n**Related Resources:**\n"
+             # Sort links alphabetically by text for consistency (optional)
+             relevant_links.sort(key=lambda x: x[0])
              for text, url in relevant_links:
                  links_section += f"- [{text}]({url})\n"
              bot_response += links_section # Append to the bot's response
@@ -343,7 +353,7 @@ def get_intro_tour():
     """Returns the list of introductory tour messages."""
     logger.info("Received /tour request.")
     try:
-        return jsonify({"tour": INTRO_TOUR_MESSAGES})
+        return jsonify({"tour": INTRO_TOUR_MESSAGES}) # Return list under 'tour' key
     except Exception as e:
         logger.exception("An unexpected error occurred in the /tour route handler:")
         return jsonify({"error": "An unexpected internal server error occurred while fetching tour data."}), 500
@@ -364,4 +374,7 @@ def internal_error(error):
 
 # --- Run the Flask App ---
 if __name__ == '__main__':
+    # In production (like Render), a WSGI server like Gunicorn runs the app,
+    # which typically handles logging differently or relies on stderr/stdout.
+    # The logging configuration above will work with Gunicorn as it writes to stderr.
     app.run(debug=True, port=5000)
